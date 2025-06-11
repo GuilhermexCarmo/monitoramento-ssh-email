@@ -1,0 +1,83 @@
+import time
+import re
+import smtplib
+from email.mime.text import MIMEText
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+LOG_FILE = '/var/log/auth.log'  # arquivo de log do ssh no Kali
+EMAIL_DE = 'seu_email@gmail.com'
+SENHA = 'sua_senha_de_app'
+EMAIL_PARA = 'destinatario@gmail.com'
+LIMITE_FALHAS = 5  # número de tentativas falhas para alertar
+INTERVALO_ALERTA = 300  # 5 minutos em segundos
+
+class SSHLogHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.falhas = []
+   
+    def on_modified(self, event):
+        if event.src_path == LOG_FILE:
+            self.checa_falhas()
+   
+    def checa_falhas(self):
+        now = time.time()
+        with open(LOG_FILE, 'r') as f:
+            linhas = f.readlines()
+        falhas_recentes = []
+        pattern = re.compile(r'Failed password for')
+       
+        for linha in linhas[-100:]:  # lê só as últimas 100 linhas para performance
+            if pattern.search(linha):
+                timestamp = self.extrai_timestamp(linha)
+                if timestamp and now - timestamp < INTERVALO_ALERTA:
+                    falhas_recentes.append(linha)
+       
+        if len(falhas_recentes) >= LIMITE_FALHAS:
+            self.envia_alerta(len(falhas_recentes))
+            self.falhas = []
+   
+    def extrai_timestamp(self, linha):
+        # Formato esperado: "Jun 11 10:25:03"
+        meses = {'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
+        try:
+            partes = linha.split()
+            mes = meses[partes[0]]
+            dia = int(partes[1])
+            hora, minuto, segundo = map(int, partes[2].split(':'))
+            now = time.localtime()
+            timestamp = time.mktime((now.tm_year, mes, dia, hora, minuto, segundo, 0, 0, -1))
+            return timestamp
+        except Exception:
+            return None
+
+    def envia_alerta(self, num_falhas):
+        corpo = f'Alerta: {num_falhas} tentativas de login SSH falharam nos últimos {INTERVALO_ALERTA//60} minutos.'
+        msg = MIMEText(corpo)
+        msg['Subject'] = 'Alerta de Segurança - SSH'
+        msg['From'] = EMAIL_DE
+        msg['To'] = EMAIL_PARA
+
+        try:
+            server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+            server.login(EMAIL_DE, SENHA)
+            server.sendmail(EMAIL_DE, EMAIL_PARA, msg.as_string())
+            server.quit()
+            print('Email de alerta enviado!')
+        except Exception as e:
+            print(f'Erro ao enviar email: {e}')
+
+
+if __name__ == "__main__":
+    event_handler = SSHLogHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path='/var/log/', recursive=False)
+    observer.start()
+    print("Monitorando tentativas de login SSH...")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
